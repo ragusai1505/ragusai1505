@@ -21,7 +21,7 @@ const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
 
 const AdminDashboard = () => {
-  const { user, token, isAdmin } = useAuth();
+  const { user, token, isAdmin, loading: authLoading } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   
@@ -37,12 +37,15 @@ const AdminDashboard = () => {
   });
 
   useEffect(() => {
-    if (!isAdmin) {
-      navigate('/');
+    // Wait for auth to finish loading before checking admin status
+    if (authLoading) return;
+    
+    if (!user || !isAdmin) {
+      navigate('/login');
       return;
     }
     fetchData();
-  }, [isAdmin, navigate]);
+  }, [user, isAdmin, authLoading, navigate]);
 
   const fetchData = async () => {
     try {
@@ -144,7 +147,7 @@ const AdminDashboard = () => {
     return colors[status] || 'text-[#A89F95] bg-[#211C18]';
   };
 
-  if (loading) {
+  if (authLoading || loading) {
     return (
       <div className="min-h-screen bg-[#161412] pt-24 flex items-center justify-center">
         <LoadingSpinner size="lg" />
