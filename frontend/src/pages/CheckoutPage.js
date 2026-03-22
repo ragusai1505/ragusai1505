@@ -1,7 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { MapPin, Phone, FileText, CreditCard, ArrowLeft, Truck } from 'lucide-react';
+import { MapPin, Phone, FileText, CreditCard, ArrowLeft, Truck, Star, Gift } from 'lucide-react';
 import { toast } from 'sonner';
 import axios from 'axios';
 import { useCart } from '@/context/CartContext';
@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
+import { Slider } from '@/components/ui/slider';
 import { LoadingSpinner } from '@/components/LoadingSpinner';
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
@@ -20,11 +21,31 @@ const CheckoutPage = () => {
   const { user, token } = useAuth();
   const navigate = useNavigate();
   const [loading, setLoading] = useState(false);
+  const [loyalty, setLoyalty] = useState(null);
+  const [pointsToRedeem, setPointsToRedeem] = useState(0);
   const [formData, setFormData] = useState({
     delivery_address: '',
     phone: '',
     notes: '',
   });
+
+  useEffect(() => {
+    const fetchLoyalty = async () => {
+      try {
+        const response = await axios.get(`${API}/loyalty/my-points`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        setLoyalty(response.data);
+      } catch (error) {
+        console.error('Failed to fetch loyalty:', error);
+      }
+    };
+    if (token) fetchLoyalty();
+  }, [token]);
+
+  const maxRedeemable = loyalty ? Math.min(loyalty.points, Math.floor(total)) : 0;
+  const discount = pointsToRedeem * 0.5;
+  const finalTotal = Math.max(0, total - discount);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -45,7 +66,8 @@ const CheckoutPage = () => {
         delivery_address: formData.delivery_address,
         phone: formData.phone,
         notes: formData.notes || null,
-        origin_url: window.location.origin
+        origin_url: window.location.origin,
+        redeem_points: pointsToRedeem
       };
 
       const response = await axios.post(`${API}/orders`, orderData, {
@@ -178,7 +200,7 @@ const CheckoutPage = () => {
                 ) : (
                   <>
                     <CreditCard className="w-5 h-5" />
-                    Pay ₹{total.toFixed(2)}
+                    Pay ₹{finalTotal.toFixed(2)}
                   </>
                 )}
               </Button>
@@ -219,15 +241,47 @@ const CheckoutPage = () => {
                   <span>Subtotal</span>
                   <span>₹{total.toFixed(2)}</span>
                 </div>
+                {pointsToRedeem > 0 && (
+                  <div className="flex justify-between text-green-400">
+                    <span>Points Discount ({pointsToRedeem} pts)</span>
+                    <span>-₹{discount.toFixed(2)}</span>
+                  </div>
+                )}
                 <div className="flex justify-between text-[#A89F95]">
                   <span>Delivery</span>
                   <span className="text-green-400">Free</span>
                 </div>
                 <div className="flex justify-between text-xl font-semibold text-[#FAEDE3] pt-2 border-t border-[#332A24]">
                   <span>Total</span>
-                  <span className="text-[#D4A373]">₹{total.toFixed(2)}</span>
+                  <span className="text-[#D4A373]">₹{finalTotal.toFixed(2)}</span>
                 </div>
               </div>
+
+              {/* Loyalty Points Redemption */}
+              {loyalty && loyalty.points > 0 && (
+                <div className="mt-6 p-4 bg-[#D4A373]/10 rounded-xl border border-[#D4A373]/30">
+                  <div className="flex items-center gap-2 mb-3">
+                    <Gift className="w-5 h-5 text-[#D4A373]" />
+                    <span className="text-[#FAEDE3] font-medium">Redeem Loyalty Points</span>
+                  </div>
+                  <p className="text-[#A89F95] text-sm mb-3">
+                    You have <span className="text-[#D4A373] font-semibold">{loyalty.points}</span> points (₹{loyalty.points_value.toFixed(2)} value)
+                  </p>
+                  <div className="space-y-2">
+                    <div className="flex justify-between text-sm">
+                      <span className="text-[#A89F95]">Redeem:</span>
+                      <span className="text-[#FAEDE3]">{pointsToRedeem} pts = ₹{discount.toFixed(2)}</span>
+                    </div>
+                    <Slider
+                      value={[pointsToRedeem]}
+                      onValueChange={([val]) => setPointsToRedeem(val)}
+                      max={maxRedeemable}
+                      step={10}
+                      className="py-2"
+                    />
+                  </div>
+                </div>
+              )}
             </div>
           </motion.div>
         </div>
