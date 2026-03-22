@@ -1,0 +1,126 @@
+{
+  "project_name": "Cafe Ikigai",
+  "theme_preference": "dark",
+  "archetype": "ORGANIC & LUXURY COFFEE",
+  "typography": {
+    "heading_font": "Playfair Display",
+    "body_font": "Manrope",
+    "setup": "Add to Google Fonts import in index.css or index.html",
+    "rules": {
+      "h1": "font-serif text-5xl md:text-7xl font-bold tracking-tighter text-[#FAEDE3]",
+      "h2": "font-serif text-4xl md:text-5xl font-semibold tracking-tight text-[#FAEDE3]",
+      "h3": "font-serif text-2xl md:text-3xl font-medium tracking-tight text-[#FAEDE3]",
+      "body": "font-sans text-base md:text-lg leading-relaxed text-[#A89F95]",
+      "overline": "font-sans text-xs uppercase tracking-[0.2em] text-[#D4A373] font-bold"
+    }
+  },
+  "colors": {
+    "background": "#161412",
+    "surface": "#211C18",
+    "surface_glass": "bg-[#161412]/80 backdrop-blur-xl",
+    "primary": "#D4A373",
+    "primary_foreground": "#161412",
+    "primary_hover": "#E5B887",
+    "secondary": "#332A24",
+    "text_main": "#FAEDE3",
+    "text_muted": "#A89F95",
+    "border": "#332A24",
+    "accent": "#B07D4C"
+  },
+  "visual_enhancers": {
+    "shadows": "Use soft ambient shadows tinted with brown, e.g., shadow-[0_8px_32px_rgba(33,28,24,0.4)]",
+    "borders": "1px solid #332A24 for cards, border-[#D4A373]/30 on hover",
+    "radius": "rounded-2xl for cards, rounded-full for primary buttons",
+    "textures": "Consider a very subtle noise overlay over the background for an organic coffee-shop feel. NO transparent backgrounds for headers without glassmorphism blur."
+  },
+  "components": {
+    "buttons": {
+      "primary": "rounded-full bg-[#D4A373] text-[#161412] hover:bg-[#E5B887] px-8 py-3 font-semibold transition-transform hover:scale-105",
+      "secondary": "rounded-full border border-[#332A24] bg-transparent text-[#FAEDE3] hover:border-[#D4A373] px-8 py-3 transition-colors"
+    },
+    "cards": {
+      "menu_item": "bg-[#211C18] border border-[#332A24] rounded-2xl p-4 transition-transform duration-300 hover:-translate-y-2 hover:border-[#D4A373]/50 hover:shadow-[0_12px_40px_rgba(212,163,115,0.15)] overflow-hidden"
+    },
+    "header": {
+      "style": "bg-[#161412]/80 backdrop-blur-2xl border-b border-[#332A24] sticky top-0 z-50 transition-colors"
+    }
+  },
+  "layouts": {
+    "hero": "Min-height 90vh, generous padding (py-32), massive serif typography. Asymmetric layout: text dominating the left, high-quality image on the right.",
+    "menu_grid": "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8 p-8",
+    "features_bento": "Asymmetric bento grid mixing col-span-1 and col-span-2 for 30-min delivery stats and promises",
+    "spacing": "Use p-8, p-12, py-24 for section spacing. Never cramp content. Add extra padding inside containers with borders to prevent text collision."
+  },
+  "motion": {
+    "hover": "Scale up images slightly inside overflow-hidden cards. Lift cards. Change border colors.",
+    "entrance": "Staggered fade-up for menu items using framer-motion.",
+    "page_transition": "Smooth opacity transitions."
+  },
+  "accessibility": {
+    "contrast": "Ensure text contrast meets WCAG AA standards. Focus states should use focus:ring-2 focus:ring-[#D4A373] focus:outline-none.",
+    "testing": "All interactive elements MUST include data-testid attribute. Format: kebab-case, role-based."
+  },
+  "image_urls": [
+    {
+      "url": "https://images.pexels.com/photos/1235706/pexels-photo-1235706.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "category": "hero",
+      "description": "Steaming dark coffee being poured, premium feel"
+    },
+    {
+      "url": "https://images.unsplash.com/photo-1705672763732-538d9a515ec1",
+      "category": "menu_item",
+      "description": "Cappuccino with latte art"
+    },
+    {
+      "url": "https://images.unsplash.com/photo-1630040995437-80b01c5dd52d",
+      "category": "menu_item",
+      "description": "White ceramic cup on wooden table"
+    },
+    {
+      "url": "https://images.unsplash.com/photo-1553578615-ee00f2db2c5c",
+      "category": "menu_item",
+      "description": "Black coffee / Americano in white cup"
+    },
+    {
+      "url": "https://images.pexels.com/photos/4828368/pexels-photo-4828368.jpeg",
+      "category": "menu_item",
+      "description": "Fresh croissants on minimalist background"
+    },
+    {
+      "url": "https://images.unsplash.com/photo-1634709170162-23a76022e9c9",
+      "category": "about_section",
+      "description": "Coffee machine brewing espresso"
+    }
+  ],
+  "libraries": {
+    "icons": "@phosphor-icons/react",
+    "motion": "framer-motion",
+    "ui": "shadcn/ui",
+    "notifications": "sonner"
+  },
+  "instructions_to_main_agent": [
+    "Use Playfair Display for all headings (h1, h2, h3). Import it from Google Fonts.",
+    "Use Manrope for body text.",
+    "The primary background must be #161412. Avoid default white or light gray.",
+    "Use the provided image_urls for the hero section and menu items. Do NOT use placeholder text for images.",
+    "Implement the shopping cart as a glassmorphic right-side drawer (use Shadcn Sheet component customized).",
+    "Implement smooth scrolling using framer-motion or simple CSS smooth scroll.",
+    "Ensure all interactive elements have data-testid attributes for testing.",
+    "Admin dashboard should share the same theme but use a tighter grid for data density.",
+    "Do NOT use HTML <select> or <input type='date'>. Use Shadcn components."
+  ],
+  "UNIVERSAL_GUIDELINES_FOR_MAIN_AGENT": [
+    "You tend to converge toward generic, 'on distribution' outputs. Make creative, distinctive frontends that surprise and delight.",
+    "Dark colors look good when used independently without gradients. DO NOT use dark colors as gradients.",
+    "Don't make generic centered layouts. Use asymmetrical or balanced left-aligned layouts.",
+    "Use glass-morphism effects with backdrop filters for floating navs and cart drawers.",
+    "You MUST NOT apply universal transition. Eg: `transition: all`.",
+    "You MUST NOT center align the app container, ie do not add `.App { text-align: center; }`.",
+    "Always use modern button styles like pill-shaped.",
+    "NEVER use AI assistant Emoji characters for icons.",
+    "Every interaction needs micro-animations - hover states, transitions.",
+    "Use 2-3x more spacing than feels comfortable.",
+    "Components MUST use named exports. Pages MUST use default exports.",
+    "Use sonner for toasts."
+  ]
+}
