@@ -57,13 +57,26 @@ const AdminDashboard = () => {
   const [reportPeriod, setReportPeriod] = useState('weekly');
 
   useEffect(() => {
+    // Still loading auth state - don't do anything
     if (authLoading) return;
-    if (!user || !isAdmin) {
-      navigate('/login');
+    
+    // No token means not logged in - redirect to login
+    if (!token) {
+      navigate('/login?redirect=/admin');
       return;
     }
-    fetchData();
-  }, [user, isAdmin, authLoading, navigate]);
+    
+    // User loaded but not admin - redirect to home
+    if (user && !isAdmin) {
+      navigate('/');
+      return;
+    }
+    
+    // User is admin - fetch data
+    if (user && isAdmin) {
+      fetchData();
+    }
+  }, [user, isAdmin, authLoading, token, navigate]);
 
   const fetchData = async () => {
     try {
