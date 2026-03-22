@@ -10,6 +10,7 @@ import { CartProvider } from "@/context/CartContext";
 import { Header } from "@/components/Header";
 import { Footer } from "@/components/Footer";
 import { CartDrawer } from "@/components/CartDrawer";
+import { Chatbot } from "@/components/Chatbot";
 
 import HomePage from "@/pages/HomePage";
 import MenuPage from "@/pages/MenuPage";
@@ -56,6 +57,7 @@ function App() {
               </Routes>
             </main>
             <Footer />
+            <Chatbot />
             <Toaster 
               position="bottom-right"
               toastOptions={{

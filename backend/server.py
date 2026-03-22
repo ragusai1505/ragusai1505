@@ -16,6 +16,7 @@ from emergentintegrations.payments.stripe.checkout import (
     StripeCheckout, CheckoutSessionResponse, CheckoutStatusResponse, CheckoutSessionRequest
 )
 import base64
+from chatbot import ChatbotService, ChatRequest, ChatResponse
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -31,6 +32,9 @@ JWT_ALGORITHM = "HS256"
 
 # Stripe Configuration
 STRIPE_API_KEY = os.environ.get('STRIPE_API_KEY')
+
+# Initialize Chatbot Service
+chatbot_service = None
 
 # Create the main app
 app = FastAPI(title="Cafe Ikigai API")
@@ -389,6 +393,17 @@ async def get_super_admin(user: dict = Depends(get_current_user)):
     if user.get("role") != "super_admin":
         raise HTTPException(status_code=403, detail="Super admin access required")
     return user
+
+async def get_optional_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    """Get user if authenticated, otherwise return None"""
+    if not credentials:
+        return None
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user = await db.users.find_one({"id": payload["sub"]}, {"_id": 0})
+        return user
+    except:
+        return None
 
 def check_permission(user: dict, permission: str) -> bool:
     role = user.get("role", "customer")
@@ -1578,6 +1593,56 @@ async def seed_data():
     await db.expenses.insert_many(expenses)
     
     return {"message": "Data seeded successfully", "items_created": len(menu_items), "inventory_items": len(inventory_items)}
+
+# ==================== CHATBOT ROUTES ====================
+
+@app.on_event("startup")
+async def startup_event():
+    global chatbot_service
+    chatbot_service = ChatbotService(db)
+
+@api_router.post("/chat", response_model=ChatResponse)
+async def chat_message(request: ChatRequest, user: dict = Depends(get_optional_user)):
+    """Send a message to the AI chatbot"""
+    if not chatbot_service:
+        raise HTTPException(status_code=500, detail="Chatbot service not initialized")
+    
+    response = await chatbot_service.process_message(
+        message=request.message,
+        session_id=request.session_id,
+        user=user
+    )
+    return response
+
+@api_router.get("/chat/session/{session_id}")
+async def get_chat_session(session_id: str):
+    """Get chat session history"""
+    session = await db.chat_sessions.find_one({"id": session_id}, {"_id": 0})
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return session
+
+@api_router.delete("/chat/session/{session_id}")
+async def clear_chat_session(session_id: str):
+    """Clear a chat session"""
+    result = await db.chat_sessions.delete_one({"id": session_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"message": "Session cleared"}
+
+@api_router.get("/chat/quick-replies")
+async def get_quick_replies():
+    """Get suggested quick reply buttons"""
+    return {
+        "replies": [
+            {"text": "View Menu", "action": "menu"},
+            {"text": "Track Order", "action": "track"},
+            {"text": "Recommendations", "action": "recommend"},
+            {"text": "My Cart", "action": "cart"},
+            {"text": "Offers", "action": "offers"},
+            {"text": "My Points", "action": "points"}
+        ]
+    }
 
 # Include router and middleware
 app.include_router(api_router)
