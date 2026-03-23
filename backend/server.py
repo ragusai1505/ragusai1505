@@ -1,10 +1,11 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, UploadFile, File
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
+import stripe as stripe_client
 from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict, EmailStr
 from typing import List, Optional, Dict, Any
@@ -12,10 +13,6 @@ import uuid
 from datetime import datetime, timezone, timedelta
 import jwt
 import bcrypt
-from emergentintegrations.payments.stripe.checkout import (
-    StripeCheckout, CheckoutSessionResponse, CheckoutStatusResponse, CheckoutSessionRequest
-)
-import base64
 from chatbot import ChatbotService, ChatRequest, ChatResponse
 
 ROOT_DIR = Path(__file__).parent
@@ -32,6 +29,7 @@ JWT_ALGORITHM = "HS256"
 
 # Stripe Configuration
 STRIPE_API_KEY = os.environ.get('STRIPE_API_KEY')
+stripe_client.api_key = STRIPE_API_KEY
 
 # Initialize Chatbot Service
 chatbot_service = None
@@ -59,8 +57,8 @@ ROLES = {
     },
     "manager": {
         "level": 50,
-        "permissions": ["view_orders", "manage_orders", "view_inventory", "manage_inventory", 
-                       "view_reports", "view_expenses", "manage_expenses", "view_users"]
+        "permissions": ["view_orders", "manage_orders", "view_inventory", "manage_inventory",
+                        "view_reports", "view_expenses", "manage_expenses", "view_users"]
     },
     "staff": {
         "level": 10,
@@ -120,13 +118,12 @@ class MenuItemUpdate(BaseModel):
     image_url: Optional[str] = None
     is_available: Optional[bool] = None
 
-# Inventory Models
 class InventoryItem(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     name: str
     sku: str
-    category: str  # raw_materials, packaging, equipment, etc.
+    category: str
     supplier_name: Optional[str] = None
     cost_price: float
     selling_price: float
@@ -134,7 +131,7 @@ class InventoryItem(BaseModel):
     low_stock_threshold: int = 10
     expiry_date: Optional[str] = None
     image_url: Optional[str] = None
-    unit: str = "pieces"  # pieces, kg, liters, etc.
+    unit: str = "pieces"
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -166,8 +163,8 @@ class InventoryItemUpdate(BaseModel):
 
 class StockAdjustment(BaseModel):
     inventory_id: str
-    adjustment_type: str  # restock, damage, wastage, sale, manual
-    quantity: int  # positive for add, negative for reduce
+    adjustment_type: str
+    quantity: int
     reason: Optional[str] = None
 
 class InventoryLog(BaseModel):
@@ -184,11 +181,10 @@ class InventoryLog(BaseModel):
     user_name: str
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
-# Expense Models
 class Expense(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    category: str  # inventory_purchase, rent, utilities, salaries, miscellaneous
+    category: str
     description: str
     amount: float
     date: str
@@ -218,28 +214,26 @@ class ExpenseUpdate(BaseModel):
     vendor: Optional[str] = None
     payment_method: Optional[str] = None
 
-# Audit Log Model
 class AuditLog(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     user_id: str
     user_name: str
     user_role: str
-    action: str  # create, update, delete, view
-    resource_type: str  # inventory, expense, order, user, menu
+    action: str
+    resource_type: str
     resource_id: Optional[str] = None
     details: Optional[Dict] = None
     ip_address: Optional[str] = None
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
-# Review Model
 class Review(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     menu_item_id: str
     user_id: str
     user_name: str
-    rating: int  # 1-5
+    rating: int
     comment: Optional[str] = None
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -248,13 +242,12 @@ class ReviewCreate(BaseModel):
     rating: int
     comment: Optional[str] = None
 
-# Loyalty Points Model
 class LoyaltyPoints(BaseModel):
     model_config = ConfigDict(extra="ignore")
     user_id: str
     points: int = 0
     lifetime_points: int = 0
-    tier: str = "bronze"  # bronze, silver, gold, platinum
+    tier: str = "bronze"
     updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 class LoyaltyTransaction(BaseModel):
@@ -262,12 +255,11 @@ class LoyaltyTransaction(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     user_id: str
     points: int
-    transaction_type: str  # earned, redeemed, expired
+    transaction_type: str
     order_id: Optional[str] = None
     description: str
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
-# Staff Management Model
 class StaffMember(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str
@@ -282,7 +274,7 @@ class StaffCreate(BaseModel):
     email: EmailStr
     password: str
     name: str
-    role: str  # manager, staff
+    role: str
 
 class StaffUpdate(BaseModel):
     name: Optional[str] = None
@@ -395,7 +387,6 @@ async def get_super_admin(user: dict = Depends(get_current_user)):
     return user
 
 async def get_optional_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    """Get user if authenticated, otherwise return None"""
     if not credentials:
         return None
     try:
@@ -441,20 +432,14 @@ def get_points_multiplier(tier: str) -> float:
     return multipliers.get(tier, 1.0)
 
 async def add_loyalty_points(user_id: str, order_total: float, order_id: str):
-    # Get user's loyalty record
     loyalty = await db.loyalty_points.find_one({"user_id": user_id})
-    
     if not loyalty:
         loyalty = {"user_id": user_id, "points": 0, "lifetime_points": 0, "tier": "bronze"}
-    
-    # Calculate points: 1 point per ₹10 spent, multiplied by tier
     multiplier = get_points_multiplier(loyalty.get("tier", "bronze"))
     points_earned = int((order_total / 10) * multiplier)
-    
     new_points = loyalty.get("points", 0) + points_earned
     new_lifetime = loyalty.get("lifetime_points", 0) + points_earned
     new_tier = calculate_tier(new_lifetime)
-    
     await db.loyalty_points.update_one(
         {"user_id": user_id},
         {"$set": {
@@ -465,8 +450,6 @@ async def add_loyalty_points(user_id: str, order_total: float, order_id: str):
         }},
         upsert=True
     )
-    
-    # Log transaction
     transaction = LoyaltyTransaction(
         user_id=user_id,
         points=points_earned,
@@ -475,7 +458,6 @@ async def add_loyalty_points(user_id: str, order_total: float, order_id: str):
         description=f"Earned {points_earned} points from order"
     )
     await db.loyalty_transactions.insert_one(transaction.model_dump())
-    
     return points_earned
 
 # ==================== AUTH ROUTES ====================
@@ -485,7 +467,6 @@ async def register(user_data: UserCreate):
     existing = await db.users.find_one({"email": user_data.email})
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
-    
     user_id = str(uuid.uuid4())
     user_doc = {
         "id": user_id,
@@ -498,8 +479,6 @@ async def register(user_data: UserCreate):
         "created_at": datetime.now(timezone.utc).isoformat()
     }
     await db.users.insert_one(user_doc)
-    
-    # Initialize loyalty points
     await db.loyalty_points.insert_one({
         "user_id": user_id,
         "points": 0,
@@ -507,7 +486,6 @@ async def register(user_data: UserCreate):
         "tier": "bronze",
         "updated_at": datetime.now(timezone.utc).isoformat()
     })
-    
     token = create_token(user_id, user_data.email, False, "customer")
     return TokenResponse(
         access_token=token,
@@ -526,16 +504,12 @@ async def login(credentials: UserLogin):
     user = await db.users.find_one({"email": credentials.email}, {"_id": 0})
     if not user or not verify_password(credentials.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    
     if not user.get("is_active", True):
         raise HTTPException(status_code=403, detail="Account is deactivated")
-    
-    # Update last login
     await db.users.update_one(
         {"id": user["id"]},
         {"$set": {"last_login": datetime.now(timezone.utc).isoformat()}}
     )
-    
     token = create_token(user["id"], user["email"], user.get("is_admin", False), user.get("role", "customer"))
     return TokenResponse(
         access_token=token,
@@ -562,27 +536,6 @@ async def get_me(user: dict = Depends(get_current_user)):
 
 # ==================== LOYALTY ROUTES ====================
 
-@api_router.get("/loyalty/my-points")
-async def get_my_loyalty(user: dict = Depends(get_current_user)):
-    loyalty = await db.loyalty_points.find_one({"user_id": user["id"]}, {"_id": 0})
-    if not loyalty:
-        loyalty = {"user_id": user["id"], "points": 0, "lifetime_points": 0, "tier": "bronze"}
-    
-    # Get recent transactions
-    transactions = await db.loyalty_transactions.find(
-        {"user_id": user["id"]},
-        {"_id": 0}
-    ).sort("created_at", -1).limit(10).to_list(10)
-    
-    return {
-        "points": loyalty.get("points", 0),
-        "lifetime_points": loyalty.get("lifetime_points", 0),
-        "tier": loyalty.get("tier", "bronze"),
-        "points_value": loyalty.get("points", 0) * 0.5,  # 1 point = ₹0.50
-        "next_tier_at": get_next_tier_threshold(loyalty.get("lifetime_points", 0)),
-        "transactions": transactions
-    }
-
 def get_next_tier_threshold(lifetime_points: int) -> dict:
     if lifetime_points < 1000:
         return {"tier": "silver", "points_needed": 1000 - lifetime_points}
@@ -591,6 +544,23 @@ def get_next_tier_threshold(lifetime_points: int) -> dict:
     elif lifetime_points < 10000:
         return {"tier": "platinum", "points_needed": 10000 - lifetime_points}
     return {"tier": "max", "points_needed": 0}
+
+@api_router.get("/loyalty/my-points")
+async def get_my_loyalty(user: dict = Depends(get_current_user)):
+    loyalty = await db.loyalty_points.find_one({"user_id": user["id"]}, {"_id": 0})
+    if not loyalty:
+        loyalty = {"user_id": user["id"], "points": 0, "lifetime_points": 0, "tier": "bronze"}
+    transactions = await db.loyalty_transactions.find(
+        {"user_id": user["id"]}, {"_id": 0}
+    ).sort("created_at", -1).limit(10).to_list(10)
+    return {
+        "points": loyalty.get("points", 0),
+        "lifetime_points": loyalty.get("lifetime_points", 0),
+        "tier": loyalty.get("tier", "bronze"),
+        "points_value": loyalty.get("points", 0) * 0.5,
+        "next_tier_at": get_next_tier_threshold(loyalty.get("lifetime_points", 0)),
+        "transactions": transactions
+    }
 
 # ==================== MENU ROUTES ====================
 
@@ -626,15 +596,11 @@ async def update_menu_item(item_id: str, updates: MenuItemUpdate, request: Reque
     update_data = {k: v for k, v in updates.model_dump().items() if v is not None}
     if not update_data:
         raise HTTPException(status_code=400, detail="No updates provided")
-    
     result = await db.menu_items.find_one_and_update(
-        {"id": item_id},
-        {"$set": update_data},
-        return_document=True
+        {"id": item_id}, {"$set": update_data}, return_document=True
     )
     if not result:
         raise HTTPException(status_code=404, detail="Menu item not found")
-    
     await log_audit(user, "update", "menu", item_id, update_data, request)
     result.pop("_id", None)
     return result
@@ -657,14 +623,11 @@ async def get_categories():
 @api_router.get("/menu/{item_id}/reviews")
 async def get_item_reviews(item_id: str):
     reviews = await db.reviews.find({"menu_item_id": item_id}, {"_id": 0}).sort("created_at", -1).to_list(50)
-    avg_rating = 0
-    if reviews:
-        avg_rating = sum(r["rating"] for r in reviews) / len(reviews)
+    avg_rating = sum(r["rating"] for r in reviews) / len(reviews) if reviews else 0
     return {"reviews": reviews, "average_rating": round(avg_rating, 1), "total_reviews": len(reviews)}
 
 @api_router.post("/reviews")
 async def create_review(review_data: ReviewCreate, user: dict = Depends(get_current_user)):
-    # Check if user has ordered this item
     order_with_item = await db.orders.find_one({
         "user_id": user["id"],
         "items.menu_item_id": review_data.menu_item_id,
@@ -672,15 +635,9 @@ async def create_review(review_data: ReviewCreate, user: dict = Depends(get_curr
     })
     if not order_with_item:
         raise HTTPException(status_code=400, detail="You can only review items you've ordered")
-    
-    # Check if already reviewed
-    existing = await db.reviews.find_one({
-        "user_id": user["id"],
-        "menu_item_id": review_data.menu_item_id
-    })
+    existing = await db.reviews.find_one({"user_id": user["id"], "menu_item_id": review_data.menu_item_id})
     if existing:
         raise HTTPException(status_code=400, detail="You've already reviewed this item")
-    
     review = Review(
         menu_item_id=review_data.menu_item_id,
         user_id=user["id"],
@@ -694,36 +651,24 @@ async def create_review(review_data: ReviewCreate, user: dict = Depends(get_curr
 # ==================== INVENTORY ROUTES ====================
 
 @api_router.get("/inventory", response_model=List[InventoryItem])
-async def get_inventory(
-    category: Optional[str] = None,
-    low_stock_only: bool = False,
-    user: dict = Depends(get_admin_user)
-):
+async def get_inventory(category: Optional[str] = None, low_stock_only: bool = False, user: dict = Depends(get_admin_user)):
     if not check_permission(user, "view_inventory"):
         raise HTTPException(status_code=403, detail="Permission denied")
-    
     query = {}
     if category:
         query["category"] = category
-    
     items = await db.inventory.find(query, {"_id": 0}).to_list(500)
-    
     if low_stock_only:
         items = [i for i in items if i["quantity"] <= i["low_stock_threshold"]]
-    
     return items
 
 @api_router.get("/inventory/categories")
 async def get_inventory_categories(user: dict = Depends(get_admin_user)):
-    categories = await db.inventory.distinct("category")
-    return categories
+    return await db.inventory.distinct("category")
 
 @api_router.get("/inventory/low-stock")
 async def get_low_stock_items(user: dict = Depends(get_admin_user)):
-    pipeline = [
-        {"$match": {"$expr": {"$lte": ["$quantity", "$low_stock_threshold"]}}},
-        {"$project": {"_id": 0}}
-    ]
+    pipeline = [{"$match": {"$expr": {"$lte": ["$quantity", "$low_stock_threshold"]}}}, {"$project": {"_id": 0}}]
     items = await db.inventory.aggregate(pipeline).to_list(100)
     return {"count": len(items), "items": items}
 
@@ -736,15 +681,11 @@ async def get_inventory_item(item_id: str, user: dict = Depends(get_admin_user))
 
 @api_router.post("/inventory", response_model=InventoryItem)
 async def create_inventory_item(item: InventoryItemCreate, request: Request, user: dict = Depends(get_manager_user)):
-    # Check for duplicate SKU
     existing = await db.inventory.find_one({"sku": item.sku})
     if existing:
         raise HTTPException(status_code=400, detail="SKU already exists")
-    
     inventory_item = InventoryItem(**item.model_dump())
     await db.inventory.insert_one(inventory_item.model_dump())
-    
-    # Log the creation
     log = InventoryLog(
         inventory_id=inventory_item.id,
         inventory_name=inventory_item.name,
@@ -758,7 +699,6 @@ async def create_inventory_item(item: InventoryItemCreate, request: Request, use
     )
     await db.inventory_logs.insert_one(log.model_dump())
     await log_audit(user, "create", "inventory", inventory_item.id, {"name": item.name, "quantity": item.quantity}, request)
-    
     return inventory_item
 
 @api_router.put("/inventory/{item_id}", response_model=InventoryItem)
@@ -766,17 +706,10 @@ async def update_inventory_item(item_id: str, updates: InventoryItemUpdate, requ
     update_data = {k: v for k, v in updates.model_dump().items() if v is not None}
     if not update_data:
         raise HTTPException(status_code=400, detail="No updates provided")
-    
     update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
-    
-    result = await db.inventory.find_one_and_update(
-        {"id": item_id},
-        {"$set": update_data},
-        return_document=True
-    )
+    result = await db.inventory.find_one_and_update({"id": item_id}, {"$set": update_data}, return_document=True)
     if not result:
         raise HTTPException(status_code=404, detail="Inventory item not found")
-    
     await log_audit(user, "update", "inventory", item_id, update_data, request)
     result.pop("_id", None)
     return result
@@ -794,17 +727,13 @@ async def adjust_stock(adjustment: StockAdjustment, request: Request, user: dict
     item = await db.inventory.find_one({"id": adjustment.inventory_id}, {"_id": 0})
     if not item:
         raise HTTPException(status_code=404, detail="Inventory item not found")
-    
     new_quantity = item["quantity"] + adjustment.quantity
     if new_quantity < 0:
         raise HTTPException(status_code=400, detail="Cannot reduce stock below 0")
-    
     await db.inventory.update_one(
         {"id": adjustment.inventory_id},
         {"$set": {"quantity": new_quantity, "updated_at": datetime.now(timezone.utc).isoformat()}}
     )
-    
-    # Log the adjustment
     log = InventoryLog(
         inventory_id=adjustment.inventory_id,
         inventory_name=item["name"],
@@ -817,9 +746,8 @@ async def adjust_stock(adjustment: StockAdjustment, request: Request, user: dict
         user_name=user["name"]
     )
     await db.inventory_logs.insert_one(log.model_dump())
-    await log_audit(user, "adjust", "inventory", adjustment.inventory_id, 
-                   {"type": adjustment.adjustment_type, "change": adjustment.quantity}, request)
-    
+    await log_audit(user, "adjust", "inventory", adjustment.inventory_id,
+                    {"type": adjustment.adjustment_type, "change": adjustment.quantity}, request)
     return {"message": "Stock adjusted", "previous": item["quantity"], "new": new_quantity}
 
 @api_router.get("/inventory/{item_id}/history")
@@ -830,15 +758,9 @@ async def get_inventory_history(item_id: str, user: dict = Depends(get_admin_use
 # ==================== EXPENSE ROUTES ====================
 
 @api_router.get("/expenses")
-async def get_expenses(
-    category: Optional[str] = None,
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
-    user: dict = Depends(get_manager_user)
-):
+async def get_expenses(category: Optional[str] = None, start_date: Optional[str] = None, end_date: Optional[str] = None, user: dict = Depends(get_manager_user)):
     if not check_permission(user, "view_expenses"):
         raise HTTPException(status_code=403, detail="Permission denied")
-    
     query = {}
     if category:
         query["category"] = category
@@ -849,10 +771,8 @@ async def get_expenses(
             query["date"]["$lte"] = end_date
         else:
             query["date"] = {"$lte": end_date}
-    
     expenses = await db.expenses.find(query, {"_id": 0}).sort("date", -1).to_list(500)
     total = sum(e.get("amount", 0) for e in expenses)
-    
     return {"expenses": expenses, "total": round(total, 2), "count": len(expenses)}
 
 @api_router.get("/expenses/categories")
@@ -870,15 +790,9 @@ async def get_expense(expense_id: str, user: dict = Depends(get_manager_user)):
 async def create_expense(expense_data: ExpenseCreate, request: Request, user: dict = Depends(get_manager_user)):
     if not check_permission(user, "manage_expenses"):
         raise HTTPException(status_code=403, detail="Permission denied")
-    
-    expense = Expense(
-        **expense_data.model_dump(),
-        created_by=user["id"],
-        created_by_name=user["name"]
-    )
+    expense = Expense(**expense_data.model_dump(), created_by=user["id"], created_by_name=user["name"])
     await db.expenses.insert_one(expense.model_dump())
     await log_audit(user, "create", "expense", expense.id, {"amount": expense_data.amount, "category": expense_data.category}, request)
-    
     return {"message": "Expense recorded", "expense": expense.model_dump()}
 
 @api_router.put("/expenses/{expense_id}")
@@ -886,17 +800,10 @@ async def update_expense(expense_id: str, updates: ExpenseUpdate, request: Reque
     update_data = {k: v for k, v in updates.model_dump().items() if v is not None}
     if not update_data:
         raise HTTPException(status_code=400, detail="No updates provided")
-    
     update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
-    
-    result = await db.expenses.find_one_and_update(
-        {"id": expense_id},
-        {"$set": update_data},
-        return_document=True
-    )
+    result = await db.expenses.find_one_and_update({"id": expense_id}, {"$set": update_data}, return_document=True)
     if not result:
         raise HTTPException(status_code=404, detail="Expense not found")
-    
     await log_audit(user, "update", "expense", expense_id, update_data, request)
     result.pop("_id", None)
     return result
@@ -915,12 +822,10 @@ async def delete_expense(expense_id: str, request: Request, user: dict = Depends
 async def create_order(order_data: OrderCreate, request: Request, user: dict = Depends(get_current_user)):
     order_items = []
     total = 0.0
-    
     for cart_item in order_data.items:
         menu_item = await db.menu_items.find_one({"id": cart_item.menu_item_id, "is_available": True}, {"_id": 0})
         if not menu_item:
             raise HTTPException(status_code=400, detail=f"Menu item {cart_item.menu_item_id} not available")
-        
         item_total = menu_item["price"] * cart_item.quantity
         total += item_total
         order_items.append(OrderItem(
@@ -929,22 +834,20 @@ async def create_order(order_data: OrderCreate, request: Request, user: dict = D
             price=menu_item["price"],
             quantity=cart_item.quantity
         ))
-    
-    # Handle points redemption
+
     discount = 0.0
-    points_to_redeem = min(order_data.redeem_points, 0)  # Default to 0
+    points_to_redeem = 0
     if order_data.redeem_points > 0:
         loyalty = await db.loyalty_points.find_one({"user_id": user["id"]})
         if loyalty and loyalty.get("points", 0) >= order_data.redeem_points:
-            discount = order_data.redeem_points * 0.5  # 1 point = ₹0.50
-            discount = min(discount, total * 0.5)  # Max 50% discount
+            discount = order_data.redeem_points * 0.5
+            discount = min(discount, total * 0.5)
             points_to_redeem = int(discount / 0.5)
-    
+
     final_total = max(0, total - discount)
-    
     order_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
-    
+
     order = Order(
         id=order_id,
         user_id=user["id"],
@@ -960,20 +863,23 @@ async def create_order(order_data: OrderCreate, request: Request, user: dict = D
         created_at=now,
         updated_at=now
     )
-    
-    # Create Stripe checkout session
+
+    # Create Stripe checkout session using official stripe library
     origin_url = order_data.origin_url.rstrip('/')
     success_url = f"{origin_url}/order-success?session_id={{CHECKOUT_SESSION_ID}}"
     cancel_url = f"{origin_url}/checkout"
-    
-    host_url = str(request.base_url).rstrip('/')
-    webhook_url = f"{host_url}api/webhook/stripe"
-    
-    stripe_checkout = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
-    
-    checkout_request = CheckoutSessionRequest(
-        amount=float(order.total),
-        currency="inr",
+
+    session = stripe_client.checkout.Session.create(
+        payment_method_types=["card"],
+        line_items=[{
+            "price_data": {
+                "currency": "inr",
+                "product_data": {"name": "Cafe Ikigai Order"},
+                "unit_amount": int(order.total * 100),
+            },
+            "quantity": 1,
+        }],
+        mode="payment",
         success_url=success_url,
         cancel_url=cancel_url,
         metadata={
@@ -982,13 +888,10 @@ async def create_order(order_data: OrderCreate, request: Request, user: dict = D
             "user_email": user["email"]
         }
     )
-    
-    session = await stripe_checkout.create_checkout_session(checkout_request)
-    order.payment_session_id = session.session_id
-    
+
+    order.payment_session_id = session.id
     await db.orders.insert_one(order.model_dump())
-    
-    # Deduct redeemed points
+
     if points_to_redeem > 0:
         await db.loyalty_points.update_one(
             {"user_id": user["id"]},
@@ -1002,9 +905,9 @@ async def create_order(order_data: OrderCreate, request: Request, user: dict = D
             description=f"Redeemed {points_to_redeem} points for ₹{discount:.2f} discount"
         )
         await db.loyalty_transactions.insert_one(transaction.model_dump())
-    
+
     payment_tx = PaymentTransaction(
-        session_id=session.session_id,
+        session_id=session.id,
         order_id=order_id,
         user_id=user["id"],
         user_email=user["email"],
@@ -1013,11 +916,11 @@ async def create_order(order_data: OrderCreate, request: Request, user: dict = D
         payment_status="initiated"
     )
     await db.payment_transactions.insert_one(payment_tx.model_dump())
-    
+
     return {
         "order_id": order_id,
         "checkout_url": session.url,
-        "session_id": session.session_id,
+        "session_id": session.id,
         "discount_applied": discount,
         "points_redeemed": points_to_redeem
     }
@@ -1043,28 +946,15 @@ async def cancel_order(order_id: str, cancel_data: OrderCancel, user: dict = Dep
         raise HTTPException(status_code=404, detail="Order not found")
     if order["user_id"] != user["id"] and not user.get("is_admin"):
         raise HTTPException(status_code=403, detail="Not authorized")
-    
-    # Can only cancel pending orders
     if order["status"] not in ["pending", "confirmed"]:
         raise HTTPException(status_code=400, detail="Cannot cancel order in current status")
-    
     now = datetime.now(timezone.utc).isoformat()
     await db.orders.update_one(
         {"id": order_id},
-        {"$set": {
-            "status": "cancelled",
-            "cancellation_reason": cancel_data.reason,
-            "cancelled_at": now,
-            "updated_at": now
-        }}
+        {"$set": {"status": "cancelled", "cancellation_reason": cancel_data.reason, "cancelled_at": now, "updated_at": now}}
     )
-    
-    # Refund redeemed points
     if order.get("points_redeemed", 0) > 0:
-        await db.loyalty_points.update_one(
-            {"user_id": order["user_id"]},
-            {"$inc": {"points": order["points_redeemed"]}}
-        )
+        await db.loyalty_points.update_one({"user_id": order["user_id"]}, {"$inc": {"points": order["points_redeemed"]}})
         transaction = LoyaltyTransaction(
             user_id=order["user_id"],
             points=order["points_redeemed"],
@@ -1073,7 +963,6 @@ async def cancel_order(order_id: str, cancel_data: OrderCancel, user: dict = Dep
             description=f"Refunded {order['points_redeemed']} points due to order cancellation"
         )
         await db.loyalty_transactions.insert_one(transaction.model_dump())
-    
     return {"message": "Order cancelled", "refund_points": order.get("points_redeemed", 0)}
 
 @api_router.get("/orders/track/{order_id}")
@@ -1106,28 +995,18 @@ async def update_order_status(order_id: str, status: str, request: Request, user
     valid_statuses = ["pending", "confirmed", "preparing", "out_for_delivery", "delivered", "cancelled"]
     if status not in valid_statuses:
         raise HTTPException(status_code=400, detail="Invalid status")
-    
     order = await db.orders.find_one({"id": order_id}, {"_id": 0})
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
-    
-    update_data = {
-        "status": status,
-        "updated_at": datetime.now(timezone.utc).isoformat()
-    }
-    
+    update_data = {"status": status, "updated_at": datetime.now(timezone.utc).isoformat()}
     if status == "confirmed":
         estimated = datetime.now(timezone.utc) + timedelta(minutes=30)
         update_data["estimated_delivery"] = estimated.isoformat()
-    
-    # Award loyalty points when delivered
     if status == "delivered" and order["status"] != "delivered":
         points_earned = await add_loyalty_points(order["user_id"], order["total"], order_id)
         update_data["points_earned"] = points_earned
-    
     await db.orders.update_one({"id": order_id}, {"$set": update_data})
     await log_audit(user, "update_status", "order", order_id, {"status": status}, request)
-    
     return {"message": "Order status updated", "status": status}
 
 # ==================== ADMIN STATS & REPORTS ====================
@@ -1137,17 +1016,12 @@ async def get_admin_stats(user: dict = Depends(get_admin_user)):
     total_orders = await db.orders.count_documents({})
     pending_orders = await db.orders.count_documents({"status": "pending"})
     completed_orders = await db.orders.count_documents({"status": "delivered"})
-    
     paid_orders = await db.orders.find({"payment_status": "paid"}, {"total": 1}).to_list(1000)
     total_revenue = sum(order.get("total", 0) for order in paid_orders)
-    
     total_users = await db.users.count_documents({"role": "customer"})
     total_menu_items = await db.menu_items.count_documents({})
-    
-    # Low stock items count
     pipeline = [{"$match": {"$expr": {"$lte": ["$quantity", "$low_stock_threshold"]}}}]
     low_stock = await db.inventory.aggregate(pipeline).to_list(100)
-    
     return {
         "total_orders": total_orders,
         "pending_orders": pending_orders,
@@ -1159,17 +1033,10 @@ async def get_admin_stats(user: dict = Depends(get_admin_user)):
     }
 
 @api_router.get("/admin/reports/sales")
-async def get_sales_report(
-    period: str = "daily",  # daily, weekly, monthly, custom
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
-    user: dict = Depends(get_manager_user)
-):
+async def get_sales_report(period: str = "daily", start_date: Optional[str] = None, end_date: Optional[str] = None, user: dict = Depends(get_manager_user)):
     if not check_permission(user, "view_reports"):
         raise HTTPException(status_code=403, detail="Permission denied")
-    
     now = datetime.now(timezone.utc)
-    
     if period == "daily":
         start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     elif period == "weekly":
@@ -1180,21 +1047,14 @@ async def get_sales_report(
         start = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
     else:
         start = now - timedelta(days=1)
-    
     end = datetime.fromisoformat(end_date.replace('Z', '+00:00')) if end_date else now
-    
-    # Get orders in date range
     orders = await db.orders.find({
         "payment_status": "paid",
         "created_at": {"$gte": start.isoformat(), "$lte": end.isoformat()}
     }, {"_id": 0}).to_list(10000)
-    
-    # Calculate metrics
     total_revenue = sum(o.get("total", 0) for o in orders)
     total_orders = len(orders)
     avg_order_value = total_revenue / total_orders if total_orders > 0 else 0
-    
-    # Top selling products
     product_sales = {}
     for order in orders:
         for item in order.get("items", []):
@@ -1203,15 +1063,8 @@ async def get_sales_report(
                 product_sales[name]["quantity"] += item.get("quantity", 0)
                 product_sales[name]["revenue"] += item.get("price", 0) * item.get("quantity", 0)
             else:
-                product_sales[name] = {
-                    "name": name,
-                    "quantity": item.get("quantity", 0),
-                    "revenue": item.get("price", 0) * item.get("quantity", 0)
-                }
-    
+                product_sales[name] = {"name": name, "quantity": item.get("quantity", 0), "revenue": item.get("price", 0) * item.get("quantity", 0)}
     top_products = sorted(product_sales.values(), key=lambda x: x["revenue"], reverse=True)[:10]
-    
-    # Daily breakdown
     daily_sales = {}
     for order in orders:
         date = order["created_at"][:10]
@@ -1220,18 +1073,11 @@ async def get_sales_report(
             daily_sales[date]["revenue"] += order.get("total", 0)
         else:
             daily_sales[date] = {"date": date, "orders": 1, "revenue": order.get("total", 0)}
-    
-    # Peak hours
     hour_sales = {}
     for order in orders:
         hour = order["created_at"][11:13]
-        if hour in hour_sales:
-            hour_sales[hour] += 1
-        else:
-            hour_sales[hour] = 1
-    
+        hour_sales[hour] = hour_sales.get(hour, 0) + 1
     peak_hours = sorted(hour_sales.items(), key=lambda x: x[1], reverse=True)[:5]
-    
     return {
         "period": period,
         "start_date": start.isoformat(),
@@ -1245,40 +1091,20 @@ async def get_sales_report(
     }
 
 @api_router.get("/admin/reports/financial")
-async def get_financial_report(
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
-    user: dict = Depends(get_manager_user)
-):
+async def get_financial_report(start_date: Optional[str] = None, end_date: Optional[str] = None, user: dict = Depends(get_manager_user)):
     now = datetime.now(timezone.utc)
     start = datetime.fromisoformat(start_date.replace('Z', '+00:00')) if start_date else now - timedelta(days=30)
     end = datetime.fromisoformat(end_date.replace('Z', '+00:00')) if end_date else now
-    
-    # Revenue
-    orders = await db.orders.find({
-        "payment_status": "paid",
-        "created_at": {"$gte": start.isoformat(), "$lte": end.isoformat()}
-    }, {"_id": 0, "total": 1}).to_list(10000)
+    orders = await db.orders.find({"payment_status": "paid", "created_at": {"$gte": start.isoformat(), "$lte": end.isoformat()}}, {"_id": 0, "total": 1}).to_list(10000)
     total_revenue = sum(o.get("total", 0) for o in orders)
-    
-    # Expenses
-    expenses = await db.expenses.find({
-        "date": {"$gte": start.isoformat()[:10], "$lte": end.isoformat()[:10]}
-    }, {"_id": 0}).to_list(10000)
+    expenses = await db.expenses.find({"date": {"$gte": start.isoformat()[:10], "$lte": end.isoformat()[:10]}}, {"_id": 0}).to_list(10000)
     total_expenses = sum(e.get("amount", 0) for e in expenses)
-    
-    # Expense breakdown by category
     expense_by_category = {}
     for e in expenses:
         cat = e.get("category", "miscellaneous")
-        if cat in expense_by_category:
-            expense_by_category[cat] += e.get("amount", 0)
-        else:
-            expense_by_category[cat] = e.get("amount", 0)
-    
+        expense_by_category[cat] = expense_by_category.get(cat, 0) + e.get("amount", 0)
     net_profit = total_revenue - total_expenses
     profit_margin = (net_profit / total_revenue * 100) if total_revenue > 0 else 0
-    
     return {
         "period": {"start": start.isoformat(), "end": end.isoformat()},
         "revenue": round(total_revenue, 2),
@@ -1293,21 +1119,16 @@ async def get_financial_report(
 
 @api_router.get("/admin/staff", response_model=List[StaffMember])
 async def get_staff(user: dict = Depends(get_super_admin)):
-    staff = await db.users.find(
-        {"role": {"$in": ["super_admin", "manager", "staff"]}},
-        {"_id": 0, "password_hash": 0}
-    ).to_list(100)
+    staff = await db.users.find({"role": {"$in": ["super_admin", "manager", "staff"]}}, {"_id": 0, "password_hash": 0}).to_list(100)
     return staff
 
 @api_router.post("/admin/staff")
 async def create_staff(staff_data: StaffCreate, request: Request, user: dict = Depends(get_super_admin)):
     if staff_data.role not in ["manager", "staff"]:
         raise HTTPException(status_code=400, detail="Invalid role")
-    
     existing = await db.users.find_one({"email": staff_data.email})
     if existing:
         raise HTTPException(status_code=400, detail="Email already exists")
-    
     staff_id = str(uuid.uuid4())
     staff_doc = {
         "id": staff_id,
@@ -1321,7 +1142,6 @@ async def create_staff(staff_data: StaffCreate, request: Request, user: dict = D
     }
     await db.users.insert_one(staff_doc)
     await log_audit(user, "create", "staff", staff_id, {"email": staff_data.email, "role": staff_data.role}, request)
-    
     return {"message": "Staff member created", "id": staff_id}
 
 @api_router.put("/admin/staff/{staff_id}")
@@ -1329,45 +1149,33 @@ async def update_staff(staff_id: str, updates: StaffUpdate, request: Request, us
     update_data = {k: v for k, v in updates.model_dump().items() if v is not None}
     if not update_data:
         raise HTTPException(status_code=400, detail="No updates provided")
-    
     if "role" in update_data and update_data["role"] not in ["manager", "staff"]:
         raise HTTPException(status_code=400, detail="Invalid role")
-    
     result = await db.users.update_one({"id": staff_id}, {"$set": update_data})
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Staff not found")
-    
     await log_audit(user, "update", "staff", staff_id, update_data, request)
     return {"message": "Staff updated"}
 
 @api_router.delete("/admin/staff/{staff_id}")
 async def delete_staff(staff_id: str, request: Request, user: dict = Depends(get_super_admin)):
-    # Can't delete yourself
     if staff_id == user["id"]:
         raise HTTPException(status_code=400, detail="Cannot delete yourself")
-    
     result = await db.users.delete_one({"id": staff_id, "role": {"$in": ["manager", "staff"]}})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Staff not found")
-    
     await log_audit(user, "delete", "staff", staff_id, None, request)
     return {"message": "Staff deleted"}
 
 # ==================== AUDIT LOGS ====================
 
 @api_router.get("/admin/audit-logs")
-async def get_audit_logs(
-    resource_type: Optional[str] = None,
-    user_id: Optional[str] = None,
-    limit: int = 100,
-    user: dict = Depends(get_super_admin)
-):
+async def get_audit_logs(resource_type: Optional[str] = None, user_id: Optional[str] = None, limit: int = 100, user: dict = Depends(get_super_admin)):
     query = {}
     if resource_type:
         query["resource_type"] = resource_type
     if user_id:
         query["user_id"] = user_id
-    
     logs = await db.audit_logs.find(query, {"_id": 0}).sort("created_at", -1).limit(limit).to_list(limit)
     return logs
 
@@ -1383,50 +1191,30 @@ async def get_database_tables(user: dict = Depends(get_super_admin)):
     return table_stats
 
 @api_router.get("/admin/database/{table_name}")
-async def get_table_data(
-    table_name: str,
-    skip: int = 0,
-    limit: int = 50,
-    search: Optional[str] = None,
-    user: dict = Depends(get_super_admin)
-):
+async def get_table_data(table_name: str, skip: int = 0, limit: int = 50, search: Optional[str] = None, user: dict = Depends(get_super_admin)):
     if table_name not in await db.list_collection_names():
         raise HTTPException(status_code=404, detail="Table not found")
-    
-    # Don't expose password hashes
     projection = {"_id": 0}
     if table_name == "users":
         projection["password_hash"] = 0
-    
     query = {}
     if search:
-        # Simple text search on common fields
         query["$or"] = [
             {"name": {"$regex": search, "$options": "i"}},
             {"email": {"$regex": search, "$options": "i"}},
             {"id": {"$regex": search, "$options": "i"}}
         ]
-    
     total = await db[table_name].count_documents(query)
     data = await db[table_name].find(query, projection).skip(skip).limit(limit).to_list(limit)
-    
-    return {
-        "table": table_name,
-        "total": total,
-        "skip": skip,
-        "limit": limit,
-        "data": data
-    }
+    return {"table": table_name, "total": total, "skip": skip, "limit": limit, "data": data}
 
 @api_router.post("/admin/database/backup")
 async def create_backup(request: Request, user: dict = Depends(get_super_admin)):
     collections = await db.list_collection_names()
     backup_data = {}
-    
     for coll in collections:
         data = await db[coll].find({}, {"_id": 0}).to_list(10000)
         backup_data[coll] = data
-    
     backup_id = str(uuid.uuid4())
     backup_doc = {
         "id": backup_id,
@@ -1435,10 +1223,8 @@ async def create_backup(request: Request, user: dict = Depends(get_super_admin))
         "collections": list(collections),
         "data": backup_data
     }
-    
     await db.backups.insert_one(backup_doc)
     await log_audit(user, "backup", "database", backup_id, {"collections": list(collections)}, request)
-    
     return {"message": "Backup created", "backup_id": backup_id}
 
 @api_router.get("/admin/database/backups")
@@ -1449,77 +1235,56 @@ async def list_backups(user: dict = Depends(get_super_admin)):
 # ==================== PAYMENT ROUTES ====================
 
 @api_router.get("/payments/status/{session_id}")
-async def get_payment_status(session_id: str, request: Request, user: dict = Depends(get_current_user)):
-    host_url = str(request.base_url).rstrip('/')
-    webhook_url = f"{host_url}api/webhook/stripe"
-    
-    stripe_checkout = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
-    status = await stripe_checkout.get_checkout_status(session_id)
-    
-    if status.payment_status == "paid":
-        tx = await db.payment_transactions.find_one({"session_id": session_id}, {"_id": 0})
-        if tx and tx.get("payment_status") != "paid":
-            await db.payment_transactions.update_one(
-                {"session_id": session_id},
-                {"$set": {
-                    "payment_status": "paid",
-                    "updated_at": datetime.now(timezone.utc).isoformat()
-                }}
-            )
-            await db.orders.update_one(
-                {"payment_session_id": session_id},
-                {"$set": {
-                    "payment_status": "paid",
-                    "status": "confirmed",
-                    "updated_at": datetime.now(timezone.utc).isoformat()
-                }}
-            )
-    
-    order_id = status.metadata.get("order_id") if status.metadata else None
-    
-    return {
-        "status": status.status,
-        "payment_status": status.payment_status,
-        "amount_total": status.amount_total,
-        "currency": status.currency,
-        "order_id": order_id
-    }
+async def get_payment_status(session_id: str, user: dict = Depends(get_current_user)):
+    try:
+        session = stripe_client.checkout.Session.retrieve(session_id)
+        if session.payment_status == "paid":
+            tx = await db.payment_transactions.find_one({"session_id": session_id}, {"_id": 0})
+            if tx and tx.get("payment_status") != "paid":
+                await db.payment_transactions.update_one(
+                    {"session_id": session_id},
+                    {"$set": {"payment_status": "paid", "updated_at": datetime.now(timezone.utc).isoformat()}}
+                )
+                await db.orders.update_one(
+                    {"payment_session_id": session_id},
+                    {"$set": {"payment_status": "paid", "status": "confirmed", "updated_at": datetime.now(timezone.utc).isoformat()}}
+                )
+        order_id = session.metadata.get("order_id") if session.metadata else None
+        return {
+            "status": session.status,
+            "payment_status": session.payment_status,
+            "amount_total": session.amount_total,
+            "currency": session.currency,
+            "order_id": order_id
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @api_router.post("/webhook/stripe")
 async def stripe_webhook(request: Request):
     body = await request.body()
     signature = request.headers.get("Stripe-Signature")
-    
-    host_url = str(request.base_url).rstrip('/')
-    webhook_url = f"{host_url}api/webhook/stripe"
-    
-    stripe_checkout = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
-    
+    webhook_secret = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
     try:
-        webhook_response = await stripe_checkout.handle_webhook(body, signature)
-        
-        if webhook_response.payment_status == "paid":
-            session_id = webhook_response.session_id
-            
-            await db.payment_transactions.update_one(
-                {"session_id": session_id},
-                {"$set": {
-                    "payment_status": "paid",
-                    "updated_at": datetime.now(timezone.utc).isoformat()
-                }}
-            )
-            
-            order_id = webhook_response.metadata.get("order_id") if webhook_response.metadata else None
-            if order_id:
-                await db.orders.update_one(
-                    {"id": order_id},
-                    {"$set": {
-                        "payment_status": "paid",
-                        "status": "confirmed",
-                        "updated_at": datetime.now(timezone.utc).isoformat()
-                    }}
+        if webhook_secret:
+            event = stripe_client.Webhook.construct_event(body, signature, webhook_secret)
+        else:
+            import json
+            event = json.loads(body)
+        if event.get("type") == "checkout.session.completed":
+            session = event["data"]["object"]
+            session_id = session["id"]
+            if session.get("payment_status") == "paid":
+                await db.payment_transactions.update_one(
+                    {"session_id": session_id},
+                    {"$set": {"payment_status": "paid", "updated_at": datetime.now(timezone.utc).isoformat()}}
                 )
-        
+                order_id = session.get("metadata", {}).get("order_id")
+                if order_id:
+                    await db.orders.update_one(
+                        {"id": order_id},
+                        {"$set": {"payment_status": "paid", "status": "confirmed", "updated_at": datetime.now(timezone.utc).isoformat()}}
+                    )
         return {"received": True}
     except Exception as e:
         logger.error(f"Webhook error: {e}")
@@ -1542,7 +1307,6 @@ async def seed_data():
     existing = await db.menu_items.count_documents({})
     if existing > 0:
         return {"message": "Data already seeded"}
-    
     menu_items = [
         {"id": str(uuid.uuid4()), "name": "Signature Espresso", "description": "Bold, smooth, full-bodied. Our house blend with notes of dark chocolate and caramel.", "price": 149.0, "category": "Espresso", "image_url": "https://images.unsplash.com/photo-1553578615-ee00f2db2c5c", "is_available": True, "created_at": datetime.now(timezone.utc).isoformat()},
         {"id": str(uuid.uuid4()), "name": "Vanilla Oat Latte", "description": "Creamy oat milk with real Madagascar vanilla and our signature espresso.", "price": 299.0, "category": "Lattes", "image_url": "https://images.unsplash.com/photo-1705672763732-538d9a515ec1", "is_available": True, "created_at": datetime.now(timezone.utc).isoformat()},
@@ -1558,8 +1322,6 @@ async def seed_data():
         {"id": str(uuid.uuid4()), "name": "Double Chocolate Mocha", "description": "For serious chocolate lovers. Double chocolate with espresso.", "price": 349.0, "category": "Mochas", "image_url": "https://images.unsplash.com/photo-1553578615-ee00f2db2c5c", "is_available": True, "created_at": datetime.now(timezone.utc).isoformat()}
     ]
     await db.menu_items.insert_many(menu_items)
-    
-    # Create super admin
     admin_exists = await db.users.find_one({"email": "admin@cafeikigai.com"})
     if not admin_exists:
         admin_user = {
@@ -1573,8 +1335,6 @@ async def seed_data():
             "created_at": datetime.now(timezone.utc).isoformat()
         }
         await db.users.insert_one(admin_user)
-    
-    # Seed inventory items
     inventory_items = [
         {"id": str(uuid.uuid4()), "name": "Arabica Coffee Beans", "sku": "INV-001", "category": "raw_materials", "supplier_name": "Premium Beans Co", "cost_price": 500.0, "selling_price": 0, "quantity": 50, "low_stock_threshold": 10, "unit": "kg", "created_at": datetime.now(timezone.utc).isoformat(), "updated_at": datetime.now(timezone.utc).isoformat()},
         {"id": str(uuid.uuid4()), "name": "Oat Milk", "sku": "INV-002", "category": "raw_materials", "supplier_name": "Dairy Alternatives Ltd", "cost_price": 120.0, "selling_price": 0, "quantity": 100, "low_stock_threshold": 20, "unit": "liters", "created_at": datetime.now(timezone.utc).isoformat(), "updated_at": datetime.now(timezone.utc).isoformat()},
@@ -1583,15 +1343,12 @@ async def seed_data():
         {"id": str(uuid.uuid4()), "name": "Caramel Syrup", "sku": "INV-005", "category": "raw_materials", "supplier_name": "Flavor House", "cost_price": 350.0, "selling_price": 0, "quantity": 12, "low_stock_threshold": 5, "unit": "bottles", "created_at": datetime.now(timezone.utc).isoformat(), "updated_at": datetime.now(timezone.utc).isoformat()},
     ]
     await db.inventory.insert_many(inventory_items)
-    
-    # Seed some expenses
     expenses = [
         {"id": str(uuid.uuid4()), "category": "rent", "description": "Monthly shop rent", "amount": 50000.0, "date": datetime.now(timezone.utc).isoformat()[:10], "vendor": "Property Management", "created_by": "system", "created_by_name": "System", "created_at": datetime.now(timezone.utc).isoformat(), "updated_at": datetime.now(timezone.utc).isoformat()},
         {"id": str(uuid.uuid4()), "category": "utilities", "description": "Electricity bill", "amount": 8500.0, "date": datetime.now(timezone.utc).isoformat()[:10], "vendor": "Power Corp", "created_by": "system", "created_by_name": "System", "created_at": datetime.now(timezone.utc).isoformat(), "updated_at": datetime.now(timezone.utc).isoformat()},
         {"id": str(uuid.uuid4()), "category": "inventory_purchase", "description": "Coffee beans restock", "amount": 25000.0, "date": datetime.now(timezone.utc).isoformat()[:10], "vendor": "Premium Beans Co", "created_by": "system", "created_by_name": "System", "created_at": datetime.now(timezone.utc).isoformat(), "updated_at": datetime.now(timezone.utc).isoformat()},
     ]
     await db.expenses.insert_many(expenses)
-    
     return {"message": "Data seeded successfully", "items_created": len(menu_items), "inventory_items": len(inventory_items)}
 
 # ==================== CHATBOT ROUTES ====================
@@ -1603,10 +1360,8 @@ async def startup_event():
 
 @api_router.post("/chat", response_model=ChatResponse)
 async def chat_message(request: ChatRequest, user: dict = Depends(get_optional_user)):
-    """Send a message to the AI chatbot"""
     if not chatbot_service:
         raise HTTPException(status_code=500, detail="Chatbot service not initialized")
-    
     response = await chatbot_service.process_message(
         message=request.message,
         session_id=request.session_id,
@@ -1616,7 +1371,6 @@ async def chat_message(request: ChatRequest, user: dict = Depends(get_optional_u
 
 @api_router.get("/chat/session/{session_id}")
 async def get_chat_session(session_id: str):
-    """Get chat session history"""
     session = await db.chat_sessions.find_one({"id": session_id}, {"_id": 0})
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -1624,7 +1378,6 @@ async def get_chat_session(session_id: str):
 
 @api_router.delete("/chat/session/{session_id}")
 async def clear_chat_session(session_id: str):
-    """Clear a chat session"""
     result = await db.chat_sessions.delete_one({"id": session_id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -1632,7 +1385,6 @@ async def clear_chat_session(session_id: str):
 
 @api_router.get("/chat/quick-replies")
 async def get_quick_replies():
-    """Get suggested quick reply buttons"""
     return {
         "replies": [
             {"text": "View Menu", "action": "menu"},
