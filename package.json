@@ -1,3 +1,10 @@
-json"engines": {
-  "node": "18.x"
+{
+  "name": "india-coffee",
+  "version": "1.0.0",
+  "private": true
 }
+```
+
+### Step 3 — Commit with message:
+```
+Fix: Clean root package.json
