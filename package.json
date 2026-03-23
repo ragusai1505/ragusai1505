@@ -1,10 +1,7 @@
+cat > package.json << 'EOF'
 {
   "name": "india-coffee",
   "version": "1.0.0",
   "private": true
 }
-```
-
-### Step 3 — Commit with message:
-```
-Fix: Clean root package.json
+EOF
